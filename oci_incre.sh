@@ -36,7 +36,9 @@ function oci_incre() {
   local arch="${osArch##*/}"
   local oldTag=$(get_tag "$oldImage")
   local newTag=$(get_tag "$newImage")
-  local incre_tar="incre-${oldTag}-${newTag}.tar"
+  # 提取 repo 名（不含 registry 和 tag）
+  local repo_name=$(echo "$newImage" | awk -F'/' '{print $(NF)}' | awk -F':' '{print $1}')
+  local incre_tar="${repo_name}-${oldTag}-to-${newTag}-incre.tar"
 
   # 拉取镜像到同一个 oci-layout 目录，自动复用 blobs
   skopeo copy --format=oci "docker://${oldImage}" "oci:${OCI_DIR}"
