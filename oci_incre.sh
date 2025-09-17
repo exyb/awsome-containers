@@ -12,37 +12,56 @@
 
 set -e
 
-# 基础变量
-OCI_DIR="$(pwd)/oci-images"
-INCRE_DIR="$(pwd)/oci-temp"
-OUT_DIR="$(pwd)/oci-incre"
-mkdir -p "$OCI_DIR"
-mkdir -p "$OUT_DIR"
-# 每次操作前清理 INCRE_DIR，保证干净
-rm -rf "$INCRE_DIR"
-mkdir -p "$INCRE_DIR"
 
 function get_tag() {
   # 从镜像名中提取 tag
   local image="$1"
   echo "$image" | awk -F: '{print $2}'
 }
+function get_default_osArch() {
+  local ARCH="$(uname -m)";
+  case "${ARCH}" in
+  aarch64|arm64)
+     _arch=arm64 ;
+     ;;
+  amd64|x86_64)
+     _arch=amd64;
+     ;;
+  *)
+    echo "Unsupported arch: ${ARCH}";
+    return 1;
+    ;;
+  esac;
+  echo "${_arch}"
+}
 
 function oci_incre() {
+
   local oldImage="$1"
   local newImage="$2"
-  local osArch="${3:-linux/amd64}"
+  local osArch="${3:-linux/$(get_default_osArch)}"
   local os="${osArch%%/*}"
   local arch="${osArch##*/}"
+
+  # 基础变量
+  OCI_DIR="$(pwd)/${arch}/oci-images"
+  INCRE_DIR="$(pwd)/${arch}/oci-temp"
+  OUT_DIR="$(pwd)/${arch}/oci-incre"
+  mkdir -p "$OCI_DIR"
+  mkdir -p "$OUT_DIR"
+  # 每次操作前清理 INCRE_DIR，保证干净
+  rm -rf "$INCRE_DIR"
+  mkdir -p "$INCRE_DIR"
+
   local oldTag=$(get_tag "$oldImage")
   local newTag=$(get_tag "$newImage")
   # 提取 repo 名（不含 registry 和 tag）
   local repo_name=$(echo "$newImage" | awk -F'/' '{print $(NF)}' | awk -F':' '{print $1}')
-  local incre_tar="${repo_name}-${oldTag}-to-${newTag}-incre.tar"
+  local incre_tar="${repo_name}-${oldTag}-to-${newTag}-incre-${arch}.tar"
 
-  # 拉取镜像到同一个 oci-layout 目录，自动复用 blobs
-  skopeo copy --format=oci "docker://${oldImage}" "oci:${OCI_DIR}"
-  skopeo copy --format=oci "docker://${newImage}" "oci:${OCI_DIR}"
+  # 拉取镜像到同一个 oci-layout 目录，自动复用 blobs, 拷贝所有arch
+  skopeo copy --src-tls-verify=false --dest-tls-verify=false --format=oci "docker://${oldImage}" "oci:${OCI_DIR}"
+  skopeo copy --src-tls-verify=false --dest-tls-verify=false --format=oci "docker://${newImage}" "oci:${OCI_DIR}"
 
   # blobs 目录（所有镜像的 blobs 都在同一个目录）
   local blobs="${OCI_DIR}/blobs/sha256"
@@ -51,10 +70,10 @@ function oci_incre() {
   mkdir -p "${INCRE_DIR}/blobs/sha256"
   local old_index_json="${INCRE_DIR}/old_index.json"
   local new_index_json="${INCRE_DIR}/new_index.json"
-  skopeo inspect --raw "docker://${oldImage}" > "$old_index_json"
-  skopeo inspect --raw "docker://${newImage}" > "$new_index_json"
+  skopeo inspect --tls-verify=false --raw "docker://${oldImage}" > "$old_index_json"
+  skopeo inspect --tls-verify=false  --raw "docker://${newImage}" > "$new_index_json"
 
-  # 获取 manifest digest（os/arch 匹配）
+  # 获取 manifest digest（os/arch 匹配） 简单匹配, 实际这里不需要select了, 已经筛选过了
   local old_manifest_digest=$(jq -r --arg os "$os" --arg arch "$arch" '.manifests[] | select(.platform.os==$os and .platform.architecture==$arch) | .digest' "$old_index_json" | head -n1 | sed 's/sha256://')
   local new_manifest_digest=$(jq -r --arg os "$os" --arg arch "$arch" '.manifests[] | select(.platform.os==$os and .platform.architecture==$arch) | .digest' "$new_index_json" | head -n1 | sed 's/sha256://')
 
@@ -85,7 +104,7 @@ function oci_incre() {
   fi
 
   # newImage 的 LayersData 中 Size==32 的 blob 也必须全部拷贝
-  local layers_data_all=$(skopeo inspect "docker://${newImage}" | jq -c '.LayersData')
+  local layers_data_all=$(skopeo inspect --tls-verify=false "docker://${newImage}" | jq -c '.LayersData')
   for link_digest in $(echo "$layers_data_all" | jq -r '.[] | select(.Size==32) | .Digest' | sed 's/sha256://'); do
     if [ -f "$blobs/$link_digest" ]; then
       cp "$blobs/$link_digest" "${INCRE_DIR}/blobs/sha256/$link_digest"
@@ -100,7 +119,7 @@ function oci_incre() {
   # 获取 RepoTags
   local repo_tag="$newImage"
   # 获取 LayerSources（将 LayersData 数组转为 LayerSources 对象）
-  local layers_data=$(skopeo inspect "docker://${newImage}" | jq -c '.LayersData')
+  local layers_data=$(skopeo inspect --tls-verify=false  "docker://${newImage}" | jq -c '.LayersData')
   local layer_sources=$(echo "$layers_data" | jq 'map({ (.Digest): { mediaType: .MIMEType, size: .Size, digest: .Digest } }) | add')
   # 构造 manifest.json
   jq -n --arg config "$manifest_config" \
@@ -143,9 +162,9 @@ function oci_incre() {
 }
 
 # 主入口
-if [ "$#" -ne 2 ]; then
-  echo "用法: $0 <oldImage> <newImage>"
+if [ "$#" -le 2 ]; then
+  echo "用法: $0 <oldImage> <newImage> [<osArch>]"
   exit 1
 fi
 
-oci_incre "$1" "$2"
+oci_incre "$1" "$2" "$3"
